@@ -1,0 +1,83 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 0 0 * * 0  # Weekly on Sundays at midnight UTC
+
+env:
+  REMOTE_NAME: 'wizden'
+  REMOTE_URL: 'https://github.com/space-wizards/space-station-14.git'
+  REMOTE_BRANCH: 'master'
+
+jobs:
+  sync_upstream:
+    runs-on: ubuntu-latest
+    if: github.repository == 'AlinaNova21/SG14'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+        with:
+          ref: master
+          fetch-depth: 0  # Fetch full history for proper merging
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Set current date as env variable
+        run: echo "NOW=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: Add/update remote
+        run: |
+          git remote remove $REMOTE_NAME 2>/dev/null || true
+          git remote add $REMOTE_NAME $REMOTE_URL
+          git fetch $REMOTE_NAME
+
+      - name: Create branch from upstream
+        run: |
+          git checkout -b automated/upstream-merge-$NOW $REMOTE_NAME/$REMOTE_BRANCH
+
+      - name: Push branch to origin
+        run: |
+          git push origin automated/upstream-merge-$NOW
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --title "Upstream Merge - $NOW" \
+            --body "$(cat <<EOF
+          ## Automated Upstream Sync
+
+          This PR syncs the latest changes from **$REMOTE_NAME/$REMOTE_BRANCH** upstream.
+
+          **Remote:** $REMOTE_URL
+
+          ### Before Merging
+
+          - [ ] Review the changes carefully
+          - [ ] Check for any conflicts with fork-specific code
+          - [ ] Verify CI tests pass
+
+          ### Merge Instructions
+
+          You can merge this PR using your preferred strategy:
+          - **Merge commit**: Preserves full upstream history
+          - **Rebase**: Creates a linear history (may require resolving conflicts)
+          - **Squash**: Not recommended for upstream syncs
+
+          ### Review Changes
+
+          Check the "Files changed" tab to see what's being synced from upstream.
+
+          ---
+          *This is an automated PR created by GitHub Actions*
+          *Branch: \\\`automated/upstream-merge-$NOW\\\`*
+          EOF
+          )" \
+            --base master \
+            --head automated/upstream-merge-$NOW
