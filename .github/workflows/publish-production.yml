@@ -1,0 +1,62 @@
+name: Publish Production
+
+on:
+  schedule:
+    - cron: '0 10 * * *'  # Daily at 10:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Get engine version
+        id: engine-version
+        run: |
+          cd RobustToolbox
+          ENGINE_VERSION=$(git describe --tags --abbrev=0 | sed 's/^v//')
+          echo "version=$ENGINE_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build client
+        uses: whoverseGames/ss14-actions/build-client@v1
+        with:
+          dotnet-version: '9.0'
+
+      - name: Build servers
+        uses: whoverseGames/ss14-actions/build-server@v1
+        with:
+          dotnet-version: '9.0'
+          platforms: '${{ vars.PLATFORMS }}'
+
+      - name: Package and publish to CDN
+        uses: whoverseGames/ss14-actions/publish-cdn@v1
+        with:
+          cdn-url: ${{ vars.CDN_URL }}
+          fork-id: ${{ vars.FORK_ID }}
+          publish-token: ${{ secrets.PUBLISH_TOKEN }}
+          engine-version: ${{ steps.engine-version.outputs.version }}
+          platforms: '${{ vars.PLATFORMS }}'
+
+      - name: Notify Discord
+        if: success() && vars.DISCORD_WEBHOOK_URL != ''
+        uses: whoverseGames/ss14-actions/notify-discord@v1
+        with:
+          webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          title: "Production Build Published"
+          description: "New build for ${{ vars.FORK_ID }} is now available"
+          color: "success"
+
+      - name: Upload artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-build
+          path: release/

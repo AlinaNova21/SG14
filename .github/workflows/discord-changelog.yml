@@ -1,0 +1,207 @@
+name: Discord Changelog
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM UTC
+
+permissions:
+  contents: read
+  actions: read  # For accessing workflow run history
+
+jobs:
+  publish_changelog:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      - name: Publish changelog to Discord
+        env:
+          CHANGELOG_FILE: ${{ vars.CHANGELOG_FILE }}
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        run: |
+          python3 - <<'EOF'
+          import io
+          import itertools
+          import os
+          import requests
+          import yaml
+          from typing import Any, Iterable
+
+          GITHUB_API_URL = os.environ.get("GITHUB_API_URL", "https://api.github.com")
+          GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
+          GITHUB_RUN = os.environ["GITHUB_RUN_ID"]
+          GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
+
+          DISCORD_SPLIT_LIMIT = 2000
+          DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK")
+          CHANGELOG_FILE = os.environ.get("CHANGELOG_FILE")
+
+          TYPES_TO_EMOJI = {
+              "Add": "🆕",
+              "Remove": "❌",
+              "Fix": "🐛",
+              "Tweak": "⚒️",
+              "Refactor": "🔧"
+          }
+
+          ChangelogEntry = dict[str, Any]
+
+          def main():
+              if not DISCORD_WEBHOOK_URL:
+                  print("No Discord webhook URL configured, skipping")
+                  return
+
+              session = requests.Session()
+              session.headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+              session.headers["Accept"] = "Accept: application/vnd.github+json"
+              session.headers["X-GitHub-Api-Version"] = "2022-11-28"
+
+              most_recent = get_most_recent_workflow(session)
+              if not most_recent:
+                  print("No previous successful run found, sending all changelog entries")
+                  last_changelog = {"Entries": []}
+              else:
+                  last_sha = most_recent['head_commit']['id']
+                  print(f"Last successful publish job was {most_recent['id']}: {last_sha}")
+                  last_changelog = yaml.safe_load(get_last_changelog(session, last_sha))
+
+              with open(CHANGELOG_FILE, "r") as f:
+                  cur_changelog = yaml.safe_load(f)
+
+              diff = diff_changelog(last_changelog, cur_changelog)
+              send_to_discord(diff)
+
+          def get_most_recent_workflow(sess: requests.Session) -> Any:
+              try:
+                  workflow_run = get_current_run(sess)
+                  past_runs = get_past_runs(sess, workflow_run)
+                  for run in past_runs['workflow_runs']:
+                      # First past successful run that isn't our current run
+                      if run["id"] == workflow_run["id"]:
+                          continue
+                      return run
+              except Exception as e:
+                  print(f"Error getting most recent workflow: {e}")
+                  return None
+
+          def get_current_run(sess: requests.Session) -> Any:
+              resp = sess.get(f"{GITHUB_API_URL}/repos/{GITHUB_REPOSITORY}/actions/runs/{GITHUB_RUN}")
+              resp.raise_for_status()
+              return resp.json()
+
+          def get_past_runs(sess: requests.Session, current_run: Any) -> Any:
+              params = {
+                  "status": "success",
+                  "created": f"<={current_run['created_at']}"
+              }
+              resp = sess.get(f"{current_run['workflow_url']}/runs", params=params)
+              resp.raise_for_status()
+              return resp.json()
+
+          def get_last_changelog(sess: requests.Session, sha: str) -> str:
+              params = {"ref": sha}
+              headers = {"Accept": "application/vnd.github.raw"}
+              resp = sess.get(
+                  f"{GITHUB_API_URL}/repos/{GITHUB_REPOSITORY}/contents/{CHANGELOG_FILE}",
+                  headers=headers,
+                  params=params
+              )
+              resp.raise_for_status()
+              return resp.text
+
+          def diff_changelog(old: dict[str, Any], cur: dict[str, Any]) -> Iterable[ChangelogEntry]:
+              old_entries = old.get("Entries", [])
+              cur_entries = cur.get("Entries", [])
+
+              # Create a set of old entry IDs
+              old_entry_ids = {e.get("id") for e in old_entries if e.get("id")}
+
+              # Return entries not in old changelog
+              return [
+                  e for e in cur_entries
+                  if e.get("id") not in old_entry_ids
+              ]
+
+          def get_discord_body(content: str):
+              return {
+                  "content": content,
+                  "allowed_mentions": {"parse": []},
+                  "flags": 1 << 2  # SUPPRESS_EMBEDS
+              }
+
+          def send_discord(content: str):
+              body = get_discord_body(content)
+              response = requests.post(DISCORD_WEBHOOK_URL, json=body)
+              response.raise_for_status()
+
+          def send_to_discord(entries: Iterable[ChangelogEntry]) -> None:
+              if not DISCORD_WEBHOOK_URL:
+                  print("No Discord webhook URL found, skipping Discord send")
+                  return
+
+              entries_list = list(entries)
+              if not entries_list:
+                  print("No new changelog entries to send")
+                  return
+
+              print(f"Sending {len(entries_list)} new changelog entries to Discord")
+
+              message_content = io.StringIO()
+
+              for author, group in itertools.groupby(entries_list, lambda x: x.get("author", "unknown")):
+                  group_content = io.StringIO()
+                  group_content.write(f"**{author}** updated:\n")
+
+                  for entry in group:
+                      url = entry.get("url", "")
+                      changes = entry.get("changes", [])
+
+                      for change in changes:
+                          change_type = change.get('type', '')
+                          emoji = TYPES_TO_EMOJI.get(change_type, "❓")
+                          message = change.get('message', '')
+
+                          if url and url.strip():
+                              group_content.write(f"[[PR]]({url}) - {emoji} - {message}\n")
+                          else:
+                              group_content.write(f"{emoji} - {message}\n")
+
+                  group_text = group_content.getvalue()
+                  message_text = message_content.getvalue()
+                  message_length = len(message_text)
+                  group_length = len(group_text)
+
+                  # If adding text would exceed Discord limit, send current message and start new one
+                  if message_length + group_length >= DISCORD_SPLIT_LIMIT:
+                      print("Split changelog and sending to Discord")
+                      send_discord(message_text)
+                      message_content = io.StringIO()
+
+                  message_content.write(group_text)
+
+              # Send remaining content
+              message_text = message_content.getvalue()
+              if len(message_text) > 0:
+                  print("Sending final changelog to Discord")
+                  send_discord(message_text)
+
+          if __name__ == "__main__":
+              main()
+          EOF

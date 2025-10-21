@@ -3,42 +3,41 @@ name: Sync Upstream
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 0 * * 0  # Weekly on Sundays at midnight UTC
+    - cron: '0 0 * * 0'  # Weekly on Sundays
 
-env:
-  REMOTE_NAME: 'wizden'
-  REMOTE_URL: 'https://github.com/space-wizards/space-station-14.git'
-  REMOTE_BRANCH: 'master'
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   sync_upstream:
     runs-on: ubuntu-latest
-    if: github.repository == 'AlinaNova21/SG14'
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4.2.2
+        uses: actions/checkout@v4
         with:
           ref: master
+          token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
           fetch-depth: 0  # Fetch full history for proper merging
 
       - name: Configure Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "${{ vars.GIT_USER_NAME }}"
+          git config user.email "${{ vars.GIT_USER_EMAIL }}"
 
       - name: Set current date as env variable
         run: echo "NOW=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
 
-      - name: Add/update remote
+      - name: Add/update upstream remote
         run: |
-          git remote remove $REMOTE_NAME 2>/dev/null || true
-          git remote add $REMOTE_NAME $REMOTE_URL
-          git fetch $REMOTE_NAME
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream https://github.com/${{ vars.UPSTREAM_REPO }}.git
+          git fetch upstream
 
       - name: Create branch from upstream
         run: |
-          git checkout -b automated/upstream-merge-$NOW $REMOTE_NAME/$REMOTE_BRANCH
+          git checkout -b automated/upstream-merge-$NOW upstream/${{ vars.UPSTREAM_BRANCH }}
 
       - name: Push branch to origin
         run: |
@@ -46,27 +45,29 @@ jobs:
 
       - name: Create Pull Request
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
           gh pr create \
-            --title "Upstream Merge - $NOW" \
-            --body "$(cat <<EOF
+            --title "Upstream Sync - $NOW" \
+            --body "$(cat <<'EOF'
           ## Automated Upstream Sync
 
-          This PR syncs the latest changes from **$REMOTE_NAME/$REMOTE_BRANCH** upstream.
+          This PR syncs the latest changes from **upstream/${{ vars.UPSTREAM_BRANCH }}** upstream.
 
-          **Remote:** $REMOTE_URL
+          **Remote:** https://github.com/${{ vars.UPSTREAM_REPO }}
+          **Date:** $NOW
 
           ### Before Merging
 
           - [ ] Review the changes carefully
           - [ ] Check for any conflicts with fork-specific code
-          - [ ] Verify CI tests pass
+          - [ ] Verify all CI tests pass
+          - [ ] Test in staging environment if available
 
           ### Merge Instructions
 
           You can merge this PR using your preferred strategy:
-          - **Merge commit**: Preserves full upstream history
+          - **Merge commit**: Preserves full upstream history (recommended)
           - **Rebase**: Creates a linear history (may require resolving conflicts)
           - **Squash**: Not recommended for upstream syncs
 
@@ -76,7 +77,7 @@ jobs:
 
           ---
           *This is an automated PR created by GitHub Actions*
-          *Branch: \\\`automated/upstream-merge-$NOW\\\`*
+          *Branch: \`automated/upstream-merge-$NOW\`*
           EOF
           )" \
             --base master \

@@ -1,14 +1,27 @@
-name: No submodule update checker
+name: No Submodule Update
 
 on:
   pull_request:
     paths:
       - 'RobustToolbox'
 
+permissions:
+  contents: read
+
 jobs:
-  this_aint_right:
-    name: Submodule update in pr found
+  check-submodule:
+    name: Prevent Unauthorized Submodule Updates
     runs-on: ubuntu-latest
+    # Allow bot users to update submodules
+    # Maintainers with branch protection bypass can force-push if needed
+    if: |
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]'
+
     steps:
-      - name: Fail
-        run: exit 1
+      - name: Fail on submodule update
+        run: |
+          echo "::error::This PR updates the RobustToolbox submodule, which is not allowed for most contributors."
+          echo "If you need to update the engine submodule, please ask a maintainer to do so."
+          echo "If this was accidental, you can reset the submodule with: git submodule update --init --recursive"
+          exit 1
