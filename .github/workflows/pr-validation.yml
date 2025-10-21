@@ -1,0 +1,172 @@
+name: PR Validation
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  # Quick checks that don't require compilation
+  quick-checks:
+    name: Quick Checks
+    # Skip draft PRs and bot users
+    if: |
+      github.event.pull_request.draft == false &&
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Check for CRLF line endings
+        run: |
+          if command -v python3 &> /dev/null && [ -f "Tools/check_crlf.py" ]; then
+            python3 Tools/check_crlf.py
+          else
+            echo "CRLF check script not found, skipping"
+          fi
+
+  # Build and test the codebase
+  build-and-test:
+    name: Build & Test
+    # Skip draft PRs and bot users
+    if: |
+      github.event.pull_request.draft == false &&
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build (Debug)
+        run: dotnet build --configuration DebugOpt --no-restore /m
+
+      - name: Run unit tests
+        if: hashFiles('Content.Tests/Content.Tests.csproj') != ''
+        run: dotnet test --no-build --configuration DebugOpt Content.Tests/Content.Tests.csproj -- NUnit.ConsoleOut=0
+
+      - name: Run integration tests
+        if: hashFiles('Content.IntegrationTests/Content.IntegrationTests.csproj') != ''
+        shell: pwsh
+        run: |
+          $env:DOTNET_gcServer=1
+          dotnet test --no-build --configuration DebugOpt Content.IntegrationTests/Content.IntegrationTests.csproj -- NUnit.ConsoleOut=0 NUnit.MapWarningTo=Failed
+
+  # YAML validation
+  yaml-validation:
+    name: YAML Linter
+    # Skip draft PRs and bot users
+    if: |
+      github.event.pull_request.draft == false &&
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0'
+
+      - name: Restore dependencies
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore /p:WarningsAsErrors= /m
+
+      - name: Run YAML Linter
+        if: hashFiles('Content.YAMLLinter/Content.YAMLLinter.csproj') != ''
+        run: dotnet run --project Content.YAMLLinter/Content.YAMLLinter.csproj --no-build
+
+  # Resource validation (only runs if relevant files changed)
+  validate-resources:
+    name: Validate Resources
+    # Skip draft PRs and bot users
+    if: |
+      github.event.pull_request.draft == false &&
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip3 install --user pillow jsonschema pyyaml
+
+      # RSI Validation
+      - name: Validate RSIs
+        if: hashFiles('RobustToolbox/Schemas/validate_rsis.py') != ''
+        run: |
+          if [ -d "Resources/" ]; then
+            python3 RobustToolbox/Schemas/validate_rsis.py Resources/
+          else
+            echo "No Resources/ directory found, skipping RSI validation"
+          fi
+
+      # RGA (Attribution) Validation
+      - name: Validate RGA (Attributions)
+        if: hashFiles('RobustToolbox/Schemas/rga.yml') != ''
+        uses: PaulRitter/yaml-schema-validator@v1
+        with:
+          schema: RobustToolbox/Schemas/rga.yml
+          path_pattern: .*attributions.ya?ml$
+          validators_path: RobustToolbox/Schemas/rga_validators.py
+          validators_requirements: RobustToolbox/Schemas/rga_requirements.txt
+
+      # Map File Validation
+      - name: Validate Map Files
+        if: hashFiles('RobustToolbox/Schemas/mapfile.yml') != ''
+        uses: PaulRitter/yaml-schema-validator@v1
+        with:
+          schema: RobustToolbox/Schemas/mapfile.yml
+          path_pattern: .*Resources/Maps/.*
+          validators_path: RobustToolbox/Schemas/mapfile_validators.py
+          validators_requirements: RobustToolbox/Schemas/mapfile_requirements.txt
+
+  # Summary job - required for branch protection
+  validation-success:
+    name: All Validations Passed
+    needs:
+      - quick-checks
+      - build-and-test
+      - yaml-validation
+      - validate-resources
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validation succeeded
+        run: echo "All PR validation checks passed!"

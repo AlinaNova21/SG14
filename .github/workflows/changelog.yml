@@ -1,0 +1,50 @@
+name: PR Changelog
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr-number:
+        description: 'Pull request number'
+        required: true
+        type: number
+
+jobs:
+  changelog:
+    # Skip for bot users and only run on merged PRs or manual dispatch
+    if: |
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      pull-requests: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use bot token if available, fallback to default GITHUB_TOKEN
+          token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Generate changelog
+        id: changelog
+        uses: whoverseGames/ss14-actions/changelog-gen@v1
+        with:
+          pr-number: ${{ github.event_name == 'workflow_dispatch' && inputs.pr-number || github.event.pull_request.number }}
+          author: ${{ github.event_name == 'workflow_dispatch' && '' || github.event.pull_request.user.login }}
+          changelog-file: ${{ vars.CHANGELOG_FILE }}
+          token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Commit changelog
+        if: steps.changelog.outputs.has-changelog == 'true'
+        run: |
+          git config user.name "${{ vars.GIT_USER_NAME }}"
+          git config user.email "${{ vars.GIT_USER_EMAIL }}"
+          git add ${{ vars.CHANGELOG_FILE }}
+          git commit -m "${{ vars.CHANGELOG_COMMIT_MESSAGE }}"
+          git push

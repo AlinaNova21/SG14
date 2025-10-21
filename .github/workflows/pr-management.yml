@@ -1,0 +1,212 @@
+name: PR Management
+
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened, ready_for_review, review_requested]
+    paths:
+      - '**'
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # Enforce PR title case formatting
+  pr-title-case:
+    name: Format PR Title
+    runs-on: ubuntu-latest
+    if: |
+      github.event.action == 'opened' ||
+      github.event.action == 'edited' ||
+      github.event.action == 'synchronize'
+
+    steps:
+      - name: Convert title to Title Case
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          script: |
+            // Simple title case implementation
+            function toTitleCase(str) {
+              // Words that should stay lowercase (unless first word)
+              const smallWords = /^(a|an|and|as|at|but|by|for|if|in|nor|of|on|or|so|the|to|up|yet)$/i;
+
+              return str
+                .toLowerCase()
+                .split(' ')
+                .map((word, index) => {
+                  // Always capitalize first and last word
+                  if (index === 0 || index === str.split(' ').length - 1) {
+                    return word.charAt(0).toUpperCase() + word.slice(1);
+                  }
+
+                  // Don't capitalize small words unless they're first/last
+                  if (smallWords.test(word)) {
+                    return word;
+                  }
+
+                  // Capitalize everything else
+                  return word.charAt(0).toUpperCase() + word.slice(1);
+                })
+                .join(' ');
+            }
+
+            const currentTitle = context.payload.pull_request.title;
+            const newTitle = toTitleCase(currentTitle);
+
+            console.log(`Current title: ${currentTitle}`);
+            console.log(`New title: ${newTitle}`);
+
+            // Only update if title changed
+            if (currentTitle !== newTitle) {
+              await github.rest.pulls.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                title: newTitle
+              });
+
+              console.log('PR title updated to Title Case');
+            } else {
+              console.log('PR title already in correct format');
+            }
+
+  # Auto-close PRs from master/main/develop branches
+  close-master-prs:
+    name: Close PRs from Master
+    runs-on: ubuntu-latest
+    if: |
+      (github.event.pull_request.head.ref == 'master' ||
+       github.event.pull_request.head.ref == 'main' ||
+       github.event.pull_request.head.ref == 'develop') &&
+      (github.event.action == 'opened' || github.event.action == 'ready_for_review')
+
+    steps:
+      - name: Close PR from master branch
+        uses: superbrothers/close-pull-request@v3
+        with:
+          comment: |
+            Thank you for contributing to our repository. Unfortunately, it looks like you submitted your pull request from the master branch.
+
+            We suggest you follow [the git usage documentation](https://docs.spacestation14.com/en/general-development/setup/git-for-the-ss14-developer.html).
+
+            You can move your current work from the master branch to another branch by [branching](https://git-scm.com/docs/git-branch) from and [resetting](https://git-scm.com/docs/git-reset) the master branch.
+
+  # Auto-label PRs based on changed files
+  auto-label-files:
+    name: Auto-label by Files
+    runs-on: ubuntu-latest
+    if: |
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Label PR
+        uses: actions/labeler@v5
+        with:
+          repo-token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+
+  # Manage review status labels
+  review-status-labels:
+    name: Review Status Labels
+    runs-on: ubuntu-latest
+    if: github.event.action == 'review_requested'
+
+    steps:
+      - name: Add needs review label
+        uses: actions-ecosystem/action-add-labels@v1
+        with:
+          github_token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          labels: "Status: Needs Review"
+
+      - name: Remove awaiting changes label
+        uses: actions-ecosystem/action-remove-labels@v1
+        with:
+          github_token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          labels: "Status: Awaiting Changes"
+
+  # Detect and label merge conflicts
+  conflict-detection:
+    name: Merge Conflict Detection
+    runs-on: ubuntu-latest
+    if: |
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]' &&
+      github.event.pull_request.draft == false &&
+      (github.event.action == 'opened' ||
+       github.event.action == 'synchronize' ||
+       github.event.action == 'reopened' ||
+       github.event.action == 'ready_for_review')
+
+    steps:
+      - name: Check for merge conflicts
+        uses: eps1lon/actions-label-merge-conflict@v3.0.2
+        with:
+          dirtyLabel: "Status: Merge Conflict"
+          repoToken: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          commentOnDirty: "This pull request has conflicts, please resolve those before we can evaluate the pull request."
+
+  # RSI diff visualization for sprite changes
+  rsi-diff:
+    name: RSI Diff Bot
+    runs-on: ubuntu-latest
+    if: |
+      github.event.action == 'opened' ||
+      github.event.action == 'synchronize'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get changed files
+        id: files
+        uses: Ana06/get-changed-files@v2.3.0
+        with:
+          format: 'space-delimited'
+          filter: |
+            **.rsi
+            **.png
+
+      - name: Diff changed RSIs
+        id: diff
+        if: steps.files.outputs.all != ''
+        uses: space-wizards/RSIDiffBot@v1.1
+        with:
+          modified: ${{ steps.files.outputs.modified }}
+          removed: ${{ steps.files.outputs.removed }}
+          added: ${{ steps.files.outputs.added }}
+          basename: ${{ github.event.pull_request.base.repo.full_name }}
+          basesha: ${{ github.event.pull_request.base.sha }}
+          headname: ${{ github.event.pull_request.head.repo.full_name }}
+          headsha: ${{ github.event.pull_request.head.sha }}
+
+      - name: Find existing comment
+        if: steps.files.outputs.all != ''
+        uses: peter-evans/find-comment@v3
+        id: fc
+        with:
+          issue-number: ${{ github.event.number }}
+          comment-author: 'github-actions[bot]'
+          body-includes: RSI Diff Bot
+
+      - name: Create or update comment
+        if: steps.files.outputs.all != ''
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          issue-number: ${{ github.event.number }}
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          edit-mode: replace
+          body: |
+            ${{ steps.diff.outputs.summary-details }}
+
+      - name: Mark comment as updated
+        if: steps.files.outputs.all != '' && steps.fc.outputs.comment-id != ''
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.fc.outputs.comment-id }}
+          edit-mode: append
+          body: |
+
+            ---
+            *Edit: diff updated after ${{ github.event.pull_request.head.sha }}*

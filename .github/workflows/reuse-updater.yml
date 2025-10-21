@@ -1,0 +1,37 @@
+name: Update REUSE Headers
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+
+jobs:
+  update-headers:
+    # Skip for bot users to prevent automation loops
+    if: |
+      github.actor != '${{ vars.GIT_USER_NAME }}' &&
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Full history needed for copyright years
+
+      - name: Update SPDX headers
+        uses: whoverseGames/ss14-actions/update-reuse-headers@v1
+        # Automatically detects copyright holder and license from repository
+
+      - name: Commit changes
+        run: |
+          git config user.name "${{ vars.GIT_USER_NAME }}"
+          git config user.email "${{ vars.GIT_USER_EMAIL }}"
+          git add -A
+          git commit -m "Update SPDX copyright headers" || exit 0
+          git push
